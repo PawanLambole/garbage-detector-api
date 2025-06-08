@@ -5,7 +5,7 @@ import numpy as np
 import os
 
 app = Flask(__name__)
-model = load_model('model.h5')  # Ensure this path is correct
+model = load_model('model.keras')  # Ensure this path is correct
 
 @app.route('/predict', methods=['POST'])
 def predict():
