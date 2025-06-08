@@ -7,11 +7,12 @@ import io
 
 app = Flask(__name__)
 
-# Load model
-MODEL_PATH = "model.keras"  # Use your correct model path
-IMG_SIZE = 96  # Size used during training
-class_names = ['cardboard', 'glass', 'metal', 'paper', 'plastic']  # Match your model's output
+# ✅ Configuration
+MODEL_PATH = "model.keras"
+IMG_SIZE = 96
+CLASS_NAMES = ['cardboard', 'glass', 'metal', 'paper', 'plastic']
 
+# ✅ Load the model
 if not os.path.exists(MODEL_PATH):
     raise FileNotFoundError(f"Model file '{MODEL_PATH}' not found!")
 
@@ -19,12 +20,12 @@ try:
     model = load_model(MODEL_PATH)
     print("✅ Model loaded successfully")
 except Exception as e:
-    print("❌ Model loading failed:", e)
+    print("❌ Failed to load model:", e)
     raise
 
 @app.route('/')
-def home():
-    return "🌍 Garbage Classifier API running! Use POST /predict with image."
+def index():
+    return "🎉 Garbage Detector API is running. Use POST /predict with an image file."
 
 @app.route('/predict', methods=['POST'])
 def predict():
@@ -34,23 +35,25 @@ def predict():
 
         file = request.files['file']
         if file.filename == '':
-            return jsonify({'error': 'Empty file name'}), 400
+            return jsonify({'error': 'No file selected'}), 400
 
         print(f"📦 Received file: {file.filename}")
 
+        # Read and preprocess image
         img_bytes = file.read()
         img = image.load_img(io.BytesIO(img_bytes), target_size=(IMG_SIZE, IMG_SIZE))
-        img_array = image.img_to_array(img).astype('float32') / 255.0
-        img_expanded = np.expand_dims(img_array, axis=0)
+        img_array = image.img_to_array(img)
+        img_array = np.expand_dims(img_array, axis=0) / 255.0  # normalize
 
-        print("🧪 Image preprocessed, running prediction...")
+        print("🧪 Image preprocessed")
 
-        predictions = model.predict(img_expanded)
-        predicted_index = int(np.argmax(predictions[0]))
-        predicted_class = class_names[predicted_index]
-        confidence = float(predictions[0][predicted_index])
+        # Predict
+        preds = model.predict(img_array)
+        predicted_index = int(np.argmax(preds[0]))
+        predicted_class = CLASS_NAMES[predicted_index]
+        confidence = float(preds[0][predicted_index])
 
-        print(f"✅ Prediction: {predicted_class} (Confidence: {confidence:.4f})")
+        print(f"✅ Prediction: {predicted_class} ({confidence:.4f})")
 
         return jsonify({
             'predicted_class': predicted_class,
