@@ -3,6 +3,7 @@ from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing import image
 import numpy as np
 import os
+import io
 
 app = Flask(__name__)
 
@@ -35,11 +36,12 @@ def predict():
 
         print(f"📦 Received file: {file.filename}")
 
-        # Load and preprocess image
-        img = image.load_img(file, target_size=(224, 224))  # Adjust if needed
+        # Convert the file to a file-like object
+        img_bytes = file.read()
+        img = image.load_img(io.BytesIO(img_bytes), target_size=(224, 224))  # Adjust if needed
         img_array = image.img_to_array(img)
         img_array = np.expand_dims(img_array, axis=0)
-        img_array = img_array / 255.0  # Normalize if model trained on normalized data
+        img_array = img_array / 255.0  # Normalize
 
         print("🧪 Image preprocessed")
 
