@@ -1,34 +1,42 @@
 from flask import Flask, request, jsonify
-from keras.models import load_model
-from keras.preprocessing import image
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing import image
 import numpy as np
 import os
 
 app = Flask(__name__)
-model = load_model('model.keras')  # Ensure this path is correct
+
+# Load the Keras model
+MODEL_PATH = "model.keras"
+
+if not os.path.exists(MODEL_PATH):
+    raise FileNotFoundError(f"Model file '{MODEL_PATH}' not found!")
+
+model = load_model(MODEL_PATH)
+
+@app.route('/')
+def index():
+    return "Keras Model API is Running!"
 
 @app.route('/predict', methods=['POST'])
 def predict():
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
 
-    file = request.files['file']
-    if file.filename == '':
+    img_file = request.files['file']
+    if img_file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
 
-    img_path = os.path.join('temp.jpg')
-    file.save(img_path)
-
-    img = image.load_img(img_path, target_size=(96, 96))  # 👈 Fix here
+    # Load and preprocess the image
+    img = image.load_img(img_file, target_size=(224, 224))  # Adjust size to your model
     img_array = image.img_to_array(img)
-    img_array = np.expand_dims(img_array, axis=0)
-    img_array = img_array / 255.0
+    img_array = np.expand_dims(img_array, axis=0) / 255.0    # Normalize if needed
 
-    predictions = model.predict(img_array)[0]
-    classes = ['class1', 'class2', 'class3']  # Replace with your actual classes
-    result = dict(zip(classes, map(float, predictions)))
+    # Predict
+    preds = model.predict(img_array)
+    pred_class = np.argmax(preds, axis=1)[0]
 
-    return jsonify(result)
+    return jsonify({'prediction': int(pred_class)})
 
 if __name__ == '__main__':
     app.run(debug=True)
