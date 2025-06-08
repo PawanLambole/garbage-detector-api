@@ -8,35 +8,52 @@ app = Flask(__name__)
 
 # Load the model
 MODEL_PATH = "model.keras"
+
 if not os.path.exists(MODEL_PATH):
     raise FileNotFoundError(f"Model file '{MODEL_PATH}' not found!")
 
-model = load_model(MODEL_PATH)
+try:
+    model = load_model(MODEL_PATH)
+    print("✅ Model loaded successfully")
+except Exception as e:
+    print("❌ Failed to load model:", e)
+    raise
 
 @app.route('/')
 def index():
-    return "🚀 Keras Model API is Running!"
+    return "🎉 Garbage Detector API is running. Use POST /predict with an image file."
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file uploaded'}), 400
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
 
-    img_file = request.files['file']
-    if img_file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
 
-    # Preprocess image (adjust target_size to match your model input)
-    img = image.load_img(img_file, target_size=(224, 224))
-    img_array = image.img_to_array(img)
-    img_array = np.expand_dims(img_array, axis=0) / 255.0
+        print(f"📦 Received file: {file.filename}")
 
-    # Predict
-    preds = model.predict(img_array)
-    pred_class = int(np.argmax(preds, axis=1)[0])
+        # Load and preprocess image
+        img = image.load_img(file, target_size=(224, 224))  # Adjust if needed
+        img_array = image.img_to_array(img)
+        img_array = np.expand_dims(img_array, axis=0)
+        img_array = img_array / 255.0  # Normalize if model trained on normalized data
 
-    return jsonify({'prediction': pred_class})
+        print("🧪 Image preprocessed")
+
+        # Predict
+        preds = model.predict(img_array)
+        pred_class = int(np.argmax(preds, axis=1)[0])
+
+        print(f"✅ Prediction: {pred_class}")
+        return jsonify({'prediction': pred_class})
+
+    except Exception as e:
+        print("❌ Error during prediction:", str(e))
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host="0.0.0.0", port=port)
