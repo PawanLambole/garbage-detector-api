@@ -1,25 +1,34 @@
 from flask import Flask, request, jsonify
-from tensorflow.keras.models import load_model
 import numpy as np
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing import image
 import io
 from PIL import Image
 
 app = Flask(__name__)
-model = load_model("model.keras")  # or "model.h5"
+model = load_model("model.keras")
 
-def preprocess_image(img_bytes):
-    img = Image.open(io.BytesIO(img_bytes)).resize((96, 96))
-    img = np.array(img) / 255.0
-    img = np.expand_dims(img, axis=0)
-    return img
+@app.route("/")
+def home():
+    return "✅ Model API is running!"
 
 @app.route("/predict", methods=["POST"])
 def predict():
     if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+        return jsonify({"error": "No image uploaded"}), 400
 
     file = request.files["file"]
-    img = preprocess_image(file.read())
+    img = Image.open(file).resize((96, 96))
+    img_array = image.img_to_array(img) / 255.0
+    img_array = np.expand_dims(img_array, axis=0)
 
-    predictions = model.predict(img)
-    return jsonify({"prediction": predictions.tolist()})
+    prediction = model.predict(img_array)
+    predicted_class = np.argmax(prediction)
+
+    return jsonify({
+        "prediction": int(predicted_class),
+        "confidence": float(np.max(prediction))
+    })
+
+if __name__ == "__main__":
+    app.run(debug=True)
