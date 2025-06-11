@@ -1,5 +1,9 @@
-Flask
-tensorflow
-gunicorn
-numpy
-pillow
+Flask==2.3.3
+tensorflow==2.18.0
+numpy==2.0.2
+scikit-learn==1.6.1
+seaborn==0.13.2
+gspread==6.2.1
+pandas==2.2.2
+Pillow==10.3.0
+gunicorn==21.2.0
