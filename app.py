@@ -8,7 +8,7 @@ app = Flask(__name__)
 model = load_model("model.keras")  # or "model.h5"
 
 def preprocess_image(img_bytes):
-    img = Image.open(io.BytesIO(img_bytes)).resize((224, 224))
+    img = Image.open(io.BytesIO(img_bytes)).resize((96, 96))
     img = np.array(img) / 255.0
     img = np.expand_dims(img, axis=0)
     return img
