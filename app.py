@@ -36,7 +36,7 @@ def load_model():
     global model
     try:
         # Try to load saved model first
-        if os.path.exists('waste_classifier_model.h5'):
+        if os.path.exists('model.h5'):
             model = tf.keras.models.load_model('waste_classifier_model.h5')
             print("Loaded saved model successfully")
         else:
