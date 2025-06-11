@@ -12,7 +12,7 @@ import os
 app = Flask(__name__)
 
 # Configuration
-IMG_SIZE = 224  # Adjust this to match your training size
+IMG_SIZE = 96  # Adjust this to match your training size
 CLASS_NAMES = ['cardboard', 'glass', 'metal', 'paper', 'plastic']
 
 # Global model variable
