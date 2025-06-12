@@ -1,204 +1,416 @@
-# 🔧 Model Optimization Solutions for Render Deployment
-
+from flask import Flask, request, jsonify
 import tensorflow as tf
+import numpy as np
+from PIL import Image
+import io
+import base64
 import os
+import gc
+from werkzeug.utils import secure_filename
+import logging
 
-# Solution 1: Check your current model size
-def check_model_size(model_path):
-    """Check model file size"""
-    if os.path.exists(model_path):
-        size_mb = os.path.getsize(model_path) / (1024 * 1024)
-        print(f"Model size: {size_mb:.2f} MB")
-        return size_mb
-    else:
-        print(f"Model file not found: {model_path}")
-        return 0
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Solution 2: Create a quantized TFLite model (Recommended)
-def create_optimized_model(keras_model_path):
-    """Create an optimized TFLite model"""
-    print("🔄 Loading original model...")
-    model = tf.keras.models.load_model(keras_model_path)
-    
-    print("🔄 Converting to TFLite with quantization...")
-    converter = tf.lite.TFLiteConverter.from_keras_model(model)
-    
-    # Enable quantization for smaller size and faster inference
-    converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    
-    # Optional: Use integer quantization for even smaller size
-    # converter.representative_dataset = representative_data_gen
-    # converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
-    # converter.inference_input_type = tf.uint8
-    # converter.inference_output_type = tf.uint8
-    
-    tflite_model = converter.convert()
-    
-    # Save the optimized model
-    with open('model_optimized.tflite', 'wb') as f:
-        f.write(tflite_model)
-    
-    original_size = check_model_size(keras_model_path)
-    optimized_size = len(tflite_model) / (1024 * 1024)
-    
-    print(f"✅ Original model: {original_size:.2f} MB")
-    print(f"✅ Optimized model: {optimized_size:.2f} MB")
-    print(f"🎯 Size reduction: {((original_size - optimized_size) / original_size * 100):.1f}%")
-    
-    return tflite_model
+app = Flask(__name__)
 
-# Solution 3: Model pruning (Advanced)
-def create_pruned_model(keras_model_path):
-    """Create a pruned model (requires tensorflow-model-optimization)"""
-    try:
-        import tensorflow_model_optimization as tfmot
-        
-        model = tf.keras.models.load_model(keras_model_path)
-        
-        # Define pruning parameters
-        pruning_params = {
-            'pruning_schedule': tfmot.sparsity.keras.PolynomialDecay(
-                initial_sparsity=0.30,
-                final_sparsity=0.70,
-                begin_step=0,
-                end_step=1000
-            )
-        }
-        
-        # Apply pruning
-        model_for_pruning = tfmot.sparsity.keras.prune_low_magnitude(
-            model, **pruning_params
-        )
-        
-        # Compile the pruned model
-        model_for_pruning.compile(
-            optimizer='adam',
-            loss='categorical_crossentropy',
-            metrics=['accuracy']
-        )
-        
-        print("✅ Pruned model created (requires fine-tuning)")
-        return model_for_pruning
-        
-    except ImportError:
-        print("❌ tensorflow-model-optimization not installed")
-        print("💡 Install with: pip install tensorflow-model-optimization")
-        return None
+# Configuration
+UPLOAD_FOLDER = 'uploads'
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'}
+IMG_SIZE = 224
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 
-# Solution 4: Lazy loading approach for Flask
-class LazyModelLoader:
-    """Load model only when needed to reduce startup memory"""
-    def __init__(self, model_path):
-        self.model_path = model_path
-        self._model = None
-        self._interpreter = None
-        self.is_tflite = model_path.endswith('.tflite')
+# Create upload folder if it doesn't exist
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# Class labels - UPDATE THESE WITH YOUR ACTUAL CLASSES
+CLASS_LABELS = [
+    'cardboard', 'glass', 'metal', 'paper', 'plastic', 'trash'
+]  # Replace with your actual class labels from training
+
+class ModelLoader:
+    """Memory-efficient model loader that supports both Keras and TFLite models"""
     
-    @property
-    def model(self):
-        if self._model is None and not self.is_tflite:
-            print("🔄 Loading Keras model...")
-            self._model = tf.keras.models.load_model(self.model_path)
-            print("✅ Keras model loaded")
-        return self._model
+    def __init__(self):
+        self.model = None
+        self.interpreter = None
+        self.model_type = None
+        self.input_details = None
+        self.output_details = None
+        self.model_loaded = False
     
-    @property
-    def interpreter(self):
-        if self._interpreter is None and self.is_tflite:
-            print("🔄 Loading TFLite interpreter...")
-            self._interpreter = tf.lite.Interpreter(model_path=self.model_path)
-            self._interpreter.allocate_tensors()
-            print("✅ TFLite interpreter loaded")
-        return self._interpreter
+    def load_model(self):
+        """Try to load model in order of preference: TFLite -> Keras -> H5"""
+        model_files = [
+            ('model_optimized.tflite', 'tflite'),
+            ('model_quantized.tflite', 'tflite'),
+            ('model.tflite', 'tflite'),
+            ('model.keras', 'keras'),
+            ('model.h5', 'h5')
+        ]
+        
+        for model_file, model_format in model_files:
+            if os.path.exists(model_file):
+                try:
+                    logger.info(f"Attempting to load {model_file} ({model_format})")
+                    
+                    if model_format == 'tflite':
+                        self._load_tflite_model(model_file)
+                    else:
+                        self._load_keras_model(model_file)
+                    
+                    self.model_type = model_format
+                    self.model_loaded = True
+                    logger.info(f"✅ Successfully loaded {model_file}")
+                    return True
+                    
+                except Exception as e:
+                    logger.error(f"❌ Failed to load {model_file}: {str(e)}")
+                    continue
+        
+        logger.error("❌ No compatible model file found!")
+        return False
+    
+    def _load_tflite_model(self, model_path):
+        """Load TFLite model"""
+        self.interpreter = tf.lite.Interpreter(model_path=model_path)
+        self.interpreter.allocate_tensors()
+        self.input_details = self.interpreter.get_input_details()
+        self.output_details = self.interpreter.get_output_details()
+        
+        # Log model info
+        input_shape = self.input_details[0]['shape']
+        logger.info(f"TFLite model input shape: {input_shape}")
+    
+    def _load_keras_model(self, model_path):
+        """Load Keras/H5 model"""
+        self.model = tf.keras.models.load_model(model_path)
+        logger.info(f"Keras model input shape: {self.model.input_shape}")
     
     def predict(self, input_data):
-        if self.is_tflite:
-            return self._predict_tflite(input_data)
-        else:
-            return self.model.predict(input_data)
+        """Make prediction using loaded model"""
+        if not self.model_loaded:
+            raise Exception("No model loaded")
+        
+        try:
+            if self.model_type == 'tflite':
+                return self._predict_tflite(input_data)
+            else:
+                return self._predict_keras(input_data)
+        except Exception as e:
+            logger.error(f"Prediction error: {str(e)}")
+            raise
     
     def _predict_tflite(self, input_data):
-        interpreter = self.interpreter
-        input_details = interpreter.get_input_details()
-        output_details = interpreter.get_output_details()
+        """Predict using TFLite model"""
+        # Ensure input data is float32
+        input_data = input_data.astype(np.float32)
         
         # Set input tensor
-        interpreter.set_tensor(input_details[0]['index'], input_data.astype(np.float32))
+        self.interpreter.set_tensor(self.input_details[0]['index'], input_data)
         
         # Run inference
-        interpreter.invoke()
+        self.interpreter.invoke()
         
         # Get output
-        output_data = interpreter.get_tensor(output_details[0]['index'])
+        output_data = self.interpreter.get_tensor(self.output_details[0]['index'])
         return output_data
+    
+    def _predict_keras(self, input_data):
+        """Predict using Keras model"""
+        return self.model.predict(input_data, verbose=0)
+    
+    def get_model_info(self):
+        """Get model information"""
+        if not self.model_loaded:
+            return {"loaded": False}
+        
+        info = {
+            "loaded": True,
+            "type": self.model_type,
+            "num_classes": len(CLASS_LABELS)
+        }
+        
+        if self.model_type == 'tflite':
+            info["input_shape"] = self.input_details[0]['shape'].tolist()
+            info["input_dtype"] = str(self.input_details[0]['dtype'])
+        else:
+            info["input_shape"] = self.model.input_shape
+        
+        return info
 
-# Solution 5: Memory-efficient Flask app
-def create_memory_efficient_app():
-    """Modified Flask app for better memory management"""
-    from flask import Flask, request, jsonify
-    import numpy as np
-    from PIL import Image
-    import io
-    import gc  # Garbage collection
-    
-    app = Flask(__name__)
-    
-    # Use lazy loading
-    model_loader = LazyModelLoader('model_optimized.tflite')  # or your model
-    
-    @app.route('/predict', methods=['POST'])
-    def predict():
-        try:
-            # Process image
-            file = request.files['file']
-            image = Image.open(io.BytesIO(file.read()))
-            
-            # Preprocess (memory efficient)
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-            
-            image = image.resize((224, 224))
-            img_array = np.array(image, dtype=np.float32) / 255.0
-            img_array = np.expand_dims(img_array, axis=0)
-            
-            # Predict
-            predictions = model_loader.predict(img_array)
-            
-            # Get results
-            predicted_class_idx = np.argmax(predictions[0])
-            confidence = float(predictions[0][predicted_class_idx])
-            
-            # Clean up memory
-            del img_array, image
-            gc.collect()
-            
-            return jsonify({
-                'success': True,
-                'predicted_class': f'Class_{predicted_class_idx}',
-                'confidence': confidence
+# Initialize model loader
+model_loader = ModelLoader()
+
+def allowed_file(filename):
+    """Check if file extension is allowed"""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def preprocess_image(image):
+    """Preprocess image for model prediction"""
+    try:
+        # Convert to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        # Resize image
+        image = image.resize((IMG_SIZE, IMG_SIZE), Image.Resampling.LANCZOS)
+        
+        # Convert to numpy array and normalize
+        img_array = np.array(image, dtype=np.float32) / 255.0
+        
+        # Add batch dimension
+        img_array = np.expand_dims(img_array, axis=0)
+        
+        return img_array
+        
+    except Exception as e:
+        logger.error(f"Error preprocessing image: {str(e)}")
+        return None
+
+def get_predictions_info(predictions):
+    """Extract prediction information"""
+    try:
+        # Handle both 2D and 1D prediction arrays
+        if len(predictions.shape) > 1:
+            pred_array = predictions[0]
+        else:
+            pred_array = predictions
+        
+        predicted_class_idx = np.argmax(pred_array)
+        confidence = float(pred_array[predicted_class_idx])
+        
+        # Get class label
+        if predicted_class_idx < len(CLASS_LABELS):
+            predicted_class = CLASS_LABELS[predicted_class_idx]
+        else:
+            predicted_class = f"Class_{predicted_class_idx}"
+        
+        # Get top 3 predictions
+        top_3_indices = np.argsort(pred_array)[-3:][::-1]
+        top_3_predictions = []
+        
+        for idx in top_3_indices:
+            class_name = CLASS_LABELS[idx] if idx < len(CLASS_LABELS) else f"Class_{idx}"
+            top_3_predictions.append({
+                'class': class_name,
+                'confidence': float(pred_array[idx]),
+                'class_index': int(idx)
             })
-            
-        except Exception as e:
-            gc.collect()  # Clean up on error too
-            return jsonify({'error': str(e)}), 500
-    
-    return app
+        
+        return predicted_class, confidence, top_3_predictions
+        
+    except Exception as e:
+        logger.error(f"Error extracting predictions: {str(e)}")
+        raise
 
-# Run the optimization
-if __name__ == "__main__":
-    # Check if you have the original model
-    model_paths = ['model.keras', 'model.h5']
+@app.route('/', methods=['GET'])
+def home():
+    """Health check endpoint"""
+    model_info = model_loader.get_model_info()
     
-    for path in model_paths:
-        if os.path.exists(path):
-            print(f"📁 Found model: {path}")
-            size = check_model_size(path)
-            
-            if size > 100:  # If larger than 100MB
-                print("⚠️  Model is large, creating optimized version...")
-                create_optimized_model(path)
-            else:
-                print("✅ Model size is acceptable")
-            break
+    return jsonify({
+        'message': '🚮 Garbage Classification API is running!',
+        'status': 'healthy',
+        'model_info': model_info,
+        'supported_formats': list(ALLOWED_EXTENSIONS),
+        'max_file_size_mb': MAX_FILE_SIZE // (1024 * 1024),
+        'endpoints': {
+            'predict_file': '/predict (POST with file)',
+            'predict_base64': '/predict/base64 (POST with base64 image)',
+            'health': '/health (GET)',
+            'model_info': '/model-info (GET)'
+        },
+        'classes': CLASS_LABELS
+    })
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Detailed health check"""
+    model_info = model_loader.get_model_info()
+    
+    return jsonify({
+        'status': 'healthy',
+        'model_info': model_info,
+        'tensorflow_version': tf.__version__,
+        'numpy_version': np.__version__,
+        'supported_formats': list(ALLOWED_EXTENSIONS),
+        'image_size': IMG_SIZE,
+        'classes': CLASS_LABELS,
+        'environment': {
+            'python_version': os.sys.version.split()[0],
+            'platform': os.name
+        }
+    })
+
+@app.route('/model-info', methods=['GET'])
+def model_info():
+    """Get detailed model information"""
+    return jsonify(model_loader.get_model_info())
+
+@app.route('/predict', methods=['POST'])
+def predict_file():
+    """Predict garbage type from uploaded file"""
+    if not model_loader.model_loaded:
+        return jsonify({'error': 'Model not loaded'}), 500
+    
+    try:
+        # Check if file is in request
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided. Please upload a file with key "file"'}), 400
+        
+        file = request.files['file']
+        
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        if not allowed_file(file.filename):
+            return jsonify({
+                'error': f'Invalid file type. Supported formats: {", ".join(ALLOWED_EXTENSIONS)}'
+            }), 400
+        
+        # Check file size
+        file.seek(0, os.SEEK_END)
+        file_size = file.tell()
+        file.seek(0)
+        
+        if file_size > MAX_FILE_SIZE:
+            return jsonify({
+                'error': f'File too large. Maximum size: {MAX_FILE_SIZE // (1024 * 1024)} MB'
+            }), 400
+        
+        # Read and process image
+        try:
+            image = Image.open(io.BytesIO(file.read()))
+        except Exception as e:
+            return jsonify({'error': f'Invalid image file: {str(e)}'}), 400
+        
+        processed_image = preprocess_image(image)
+        
+        if processed_image is None:
+            return jsonify({'error': 'Error processing image'}), 400
+        
+        # Make prediction
+        predictions = model_loader.predict(processed_image)
+        predicted_class, confidence, top_3_predictions = get_predictions_info(predictions)
+        
+        # Clean up memory
+        del processed_image, image
+        gc.collect()
+        
+        return jsonify({
+            'success': True,
+            'predicted_class': predicted_class,
+            'confidence': confidence,
+            'top_3_predictions': top_3_predictions,
+            'filename': secure_filename(file.filename),
+            'file_size_mb': round(file_size / (1024 * 1024), 2),
+            'model_type': model_loader.model_type
+        })
+        
+    except Exception as e:
+        # Clean up memory on error
+        gc.collect()
+        logger.error(f"Prediction error: {str(e)}")
+        return jsonify({'error': f'Prediction failed: {str(e)}'}), 500
+
+@app.route('/predict/base64', methods=['POST'])
+def predict_base64():
+    """Predict garbage type from base64 encoded image"""
+    if not model_loader.model_loaded:
+        return jsonify({'error': 'Model not loaded'}), 500
+    
+    try:
+        data = request.get_json()
+        
+        if not data or 'image' not in data:
+            return jsonify({
+                'error': 'No base64 image provided. Expected JSON: {"image": "base64_string"}'
+            }), 400
+        
+        # Decode base64 image
+        image_data = data['image']
+        
+        # Remove data URL prefix if present
+        if image_data.startswith('data:image'):
+            image_data = image_data.split(',')[1]
+        
+        try:
+            # Decode base64
+            image_bytes = base64.b64decode(image_data)
+            image = Image.open(io.BytesIO(image_bytes))
+        except Exception as e:
+            return jsonify({'error': f'Invalid base64 image: {str(e)}'}), 400
+        
+        # Process and predict
+        processed_image = preprocess_image(image)
+        
+        if processed_image is None:
+            return jsonify({'error': 'Error processing image'}), 400
+        
+        # Make prediction
+        predictions = model_loader.predict(processed_image)
+        predicted_class, confidence, top_3_predictions = get_predictions_info(predictions)
+        
+        # Clean up memory
+        del processed_image, image, image_bytes
+        gc.collect()
+        
+        return jsonify({
+            'success': True,
+            'predicted_class': predicted_class,
+            'confidence': confidence,
+            'top_3_predictions': top_3_predictions,
+            'model_type': model_loader.model_type
+        })
+        
+    except Exception as e:
+        # Clean up memory on error
+        gc.collect()
+        logger.error(f"Base64 prediction error: {str(e)}")
+        return jsonify({'error': f'Prediction failed: {str(e)}'}), 500
+
+@app.errorhandler(413)
+def too_large(e):
+    return jsonify({'error': 'File too large'}), 413
+
+@app.errorhandler(500)
+def server_error(e):
+    return jsonify({'error': 'Internal server error'}), 500
+
+# Initialize model on startup
+def initialize_app():
+    """Initialize the application"""
+    logger.info("🚀 Starting Garbage Classification API...")
+    
+    # Try to load model
+    if model_loader.load_model():
+        logger.info("✅ Model loaded successfully!")
+        model_info = model_loader.get_model_info()
+        logger.info(f"Model type: {model_info.get('type', 'unknown')}")
+        logger.info(f"Number of classes: {len(CLASS_LABELS)}")
     else:
-        print("❌ No model file found! Please ensure model.keras or model.h5 exists.")
+        logger.error("❌ Failed to load model!")
+        logger.error("Available files in current directory:")
+        for file in os.listdir('.'):
+            if file.endswith(('.keras', '.h5', '.tflite')):
+                size_mb = os.path.getsize(file) / (1024 * 1024)
+                logger.error(f"  - {file} ({size_mb:.2f} MB)")
+
+if __name__ == '__main__':
+    initialize_app()
+    
+    # Run the app
+    port = int(os.environ.get('PORT', 5000))
+    debug_mode = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
+    
+    app.run(
+        host='0.0.0.0', 
+        port=port, 
+        debug=debug_mode,
+        threaded=True
+    )
+else:
+    # For production servers like Gunicorn
+    initialize_app()
