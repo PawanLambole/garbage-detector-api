@@ -68,16 +68,18 @@ def preprocess_image(image):
     except Exception as e:
         raise Exception(f"Error preprocessing image: {str(e)}")
 
-@app.route('/', methods=['GET'])
-def home():
-    """Health check endpoint"""
+@app.route('/debug', methods=['GET'])
+def debug_files():
+    """Debug endpoint to check files"""
+    import os
+    current_dir = os.getcwd()
+    files = os.listdir(current_dir)
+    
     return jsonify({
-        'status': 'healthy',
-        'message': 'Waste Classification API is running',
-        'model_loaded': model is not None,
-        'classes': CLASS_NAMES,
-        'image_size': f"{IMG_SIZE}x{IMG_SIZE}",
-        'version': '1.0'
+        'current_directory': current_dir,
+        'files_in_directory': files,
+        'model_h5_exists': os.path.exists('model.h5'),
+        'model_h5_size': os.path.getsize('model.h5') if os.path.exists('model.h5') else 'File not found'
     })
 
 @app.route('/predict', methods=['POST'])
