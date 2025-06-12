@@ -1,228 +1,222 @@
 from flask import Flask, request, jsonify
 import tensorflow as tf
-from tensorflow.keras.applications import MobileNetV2
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
-from tensorflow.keras.models import Model
 import numpy as np
 from PIL import Image
 import io
 import base64
 import os
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
 # Configuration
-IMG_SIZE = 96  # Adjust this to match your training size
-CLASS_NAMES = ['cardboard', 'glass', 'metal', 'paper', 'plastic']
+UPLOAD_FOLDER = 'uploads'
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+IMG_SIZE = 224
 
-# Global model variable
+# Create upload folder if it doesn't exist
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# Load the model (will be loaded when the app starts)
 model = None
 
-def create_model():
-    """Create and return the model architecture"""
-    base_model = MobileNetV2(input_shape=(IMG_SIZE, IMG_SIZE, 3), include_top=False, weights='imagenet')
-    base_model.trainable = False
-    
-    x = base_model.output
-    x = GlobalAveragePooling2D()(x)
-    x = Dropout(0.3)(x)
-    output = Dense(len(CLASS_NAMES), activation='softmax')(x)
-    
-    model = Model(inputs=base_model.input, outputs=output)
-    return model
+# Class labels - Update these based on your dataset
+CLASS_LABELS = [
+    'cardboard', 'glass', 'metal', 'paper', 'plastic', 'trash'
+]  # Replace with your actual class labels
 
 def load_model():
     """Load the trained model"""
     global model
     try:
-        # Check for model.h5 file (matching your file structure)
-        if os.path.exists('model.h5'):
+        # Try loading different model formats
+        if os.path.exists('model.keras'):
+            model = tf.keras.models.load_model('model.keras')
+            print("✅ Model loaded from model.keras")
+        elif os.path.exists('model.h5'):
             model = tf.keras.models.load_model('model.h5')
-            print("Loaded saved model successfully from model.h5")
+            print("✅ Model loaded from model.h5")
         else:
-            # Create new model if no saved model exists
-            model = create_model()
-            print("Created new model - you'll need to train it or load weights")
-            print("Available files:", os.listdir('.'))
+            print("❌ No model file found!")
+            return False
+        return True
     except Exception as e:
-        print(f"Error loading model: {e}")
-        print("Creating new model architecture...")
-        model = create_model()
+        print(f"❌ Error loading model: {str(e)}")
+        return False
+
+def allowed_file(filename):
+    """Check if file extension is allowed"""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def preprocess_image(image):
-    """Preprocess image for prediction"""
+    """Preprocess image for model prediction"""
     try:
-        # Convert to RGB if necessary
+        # Convert to RGB if needed
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
         # Resize image
         image = image.resize((IMG_SIZE, IMG_SIZE))
         
-        # Convert to array and normalize
-        img_array = np.array(image)
+        # Convert to numpy array and normalize
+        img_array = np.array(image) / 255.0
+        
+        # Add batch dimension
         img_array = np.expand_dims(img_array, axis=0)
-        img_array = img_array.astype('float32') / 255.0
         
         return img_array
     except Exception as e:
-        raise Exception(f"Error preprocessing image: {str(e)}")
+        print(f"Error preprocessing image: {str(e)}")
+        return None
 
-@app.route('/debug', methods=['GET'])
-def debug_files():
-    """Debug endpoint to check files"""
-    import os
-    current_dir = os.getcwd()
-    files = os.listdir(current_dir)
-    
+@app.route('/', methods=['GET'])
+def home():
+    """Health check endpoint"""
     return jsonify({
-        'current_directory': current_dir,
-        'files_in_directory': files,
-        'model_h5_exists': os.path.exists('model.h5'),
-        'model_h5_size': os.path.getsize('model.h5') if os.path.exists('model.h5') else 'File not found'
+        'message': '🚮 Garbage Classification API is running!',
+        'status': 'healthy',
+        'model_loaded': model is not None,
+        'endpoints': {
+            'predict_file': '/predict (POST with file)',
+            'predict_base64': '/predict/base64 (POST with base64 image)',
+            'health': '/ (GET)'
+        }
     })
 
 @app.route('/predict', methods=['POST'])
-def predict():
-    """Predict waste type from uploaded image"""
+def predict_file():
+    """Predict garbage type from uploaded file"""
+    if model is None:
+        return jsonify({'error': 'Model not loaded'}), 500
+    
     try:
-        if model is None:
-            return jsonify({
-                'error': 'Model not loaded',
-                'message': 'Please check if model.h5 file exists in the deployment'
-            }), 500
+        # Check if file is in request
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
         
-        # Check if image file is present
-        if 'image' not in request.files:
-            return jsonify({
-                'error': 'No image file provided',
-                'message': 'Please upload an image file with key "image"'
-            }), 400
+        file = request.files['file']
         
-        file = request.files['image']
         if file.filename == '':
-            return jsonify({
-                'error': 'No image file selected',
-                'message': 'Please select a valid image file'
-            }), 400
+            return jsonify({'error': 'No file selected'}), 400
         
-        # Validate file type
-        allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'bmp'}
-        file_extension = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
-        if file_extension not in allowed_extensions:
-            return jsonify({
-                'error': 'Invalid file type',
-                'message': f'Allowed types: {", ".join(allowed_extensions)}'
-            }), 400
+        if not allowed_file(file.filename):
+            return jsonify({'error': 'Invalid file type. Allowed: png, jpg, jpeg, gif'}), 400
         
-        # Read and preprocess image
-        image = Image.open(file.stream)
+        # Read and process image
+        image = Image.open(io.BytesIO(file.read()))
         processed_image = preprocess_image(image)
         
+        if processed_image is None:
+            return jsonify({'error': 'Error processing image'}), 400
+        
         # Make prediction
-        predictions = model.predict(processed_image, verbose=0)
+        predictions = model.predict(processed_image)
         predicted_class_idx = np.argmax(predictions[0])
-        predicted_class = CLASS_NAMES[predicted_class_idx]
         confidence = float(predictions[0][predicted_class_idx])
         
-        # Get all class probabilities
-        class_probabilities = {
-            CLASS_NAMES[i]: round(float(predictions[0][i]), 4)
-            for i in range(len(CLASS_NAMES))
-        }
+        # Get class label
+        predicted_class = CLASS_LABELS[predicted_class_idx] if predicted_class_idx < len(CLASS_LABELS) else f"Class_{predicted_class_idx}"
+        
+        # Get top 3 predictions
+        top_3_indices = np.argsort(predictions[0])[-3:][::-1]
+        top_3_predictions = []
+        
+        for idx in top_3_indices:
+            class_name = CLASS_LABELS[idx] if idx < len(CLASS_LABELS) else f"Class_{idx}"
+            top_3_predictions.append({
+                'class': class_name,
+                'confidence': float(predictions[0][idx])
+            })
         
         return jsonify({
             'success': True,
             'predicted_class': predicted_class,
-            'confidence': round(confidence, 4),
-            'all_probabilities': class_probabilities,
-            'image_processed': True
+            'confidence': confidence,
+            'top_3_predictions': top_3_predictions,
+            'filename': secure_filename(file.filename)
         })
-    
+        
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e),
-            'message': 'Error processing image'
-        }), 500
+        return jsonify({'error': f'Prediction failed: {str(e)}'}), 500
 
-@app.route('/predict_base64', methods=['POST'])
+@app.route('/predict/base64', methods=['POST'])
 def predict_base64():
-    """Predict waste type from base64 encoded image"""
+    """Predict garbage type from base64 encoded image"""
+    if model is None:
+        return jsonify({'error': 'Model not loaded'}), 500
+    
     try:
-        if model is None:
-            return jsonify({
-                'error': 'Model not loaded',
-                'message': 'Please check if model.h5 file exists in the deployment'
-            }), 500
+        data = request.get_json()
         
-        data = request.json
         if not data or 'image' not in data:
-            return jsonify({
-                'error': 'No base64 image data provided',
-                'message': 'Please provide base64 image data in JSON format: {"image": "base64_string"}'
-            }), 400
+            return jsonify({'error': 'No base64 image provided'}), 400
         
-        try:
-            # Decode base64 image
-            image_data = base64.b64decode(data['image'])
-            image = Image.open(io.BytesIO(image_data))
-        except Exception as e:
-            return jsonify({
-                'error': 'Invalid base64 image data',
-                'message': str(e)
-            }), 400
+        # Decode base64 image
+        image_data = data['image']
         
+        # Remove data URL prefix if present
+        if image_data.startswith('data:image'):
+            image_data = image_data.split(',')[1]
+        
+        # Decode base64
+        image_bytes = base64.b64decode(image_data)
+        image = Image.open(io.BytesIO(image_bytes))
+        
+        # Process and predict
         processed_image = preprocess_image(image)
         
+        if processed_image is None:
+            return jsonify({'error': 'Error processing image'}), 400
+        
         # Make prediction
-        predictions = model.predict(processed_image, verbose=0)
+        predictions = model.predict(processed_image)
         predicted_class_idx = np.argmax(predictions[0])
-        predicted_class = CLASS_NAMES[predicted_class_idx]
         confidence = float(predictions[0][predicted_class_idx])
         
-        # Get all class probabilities
-        class_probabilities = {
-            CLASS_NAMES[i]: round(float(predictions[0][i]), 4)
-            for i in range(len(CLASS_NAMES))
-        }
+        # Get class label
+        predicted_class = CLASS_LABELS[predicted_class_idx] if predicted_class_idx < len(CLASS_LABELS) else f"Class_{predicted_class_idx}"
+        
+        # Get top 3 predictions
+        top_3_indices = np.argsort(predictions[0])[-3:][::-1]
+        top_3_predictions = []
+        
+        for idx in top_3_indices:
+            class_name = CLASS_LABELS[idx] if idx < len(CLASS_LABELS) else f"Class_{idx}"
+            top_3_predictions.append({
+                'class': class_name,
+                'confidence': float(predictions[0][idx])
+            })
         
         return jsonify({
             'success': True,
             'predicted_class': predicted_class,
-            'confidence': round(confidence, 4),
-            'all_probabilities': class_probabilities,
-            'image_processed': True
+            'confidence': confidence,
+            'top_3_predictions': top_3_predictions
         })
-    
+        
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e),
-            'message': 'Error processing base64 image'
-        }), 500
+        return jsonify({'error': f'Prediction failed: {str(e)}'}), 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
     """Detailed health check"""
     return jsonify({
         'status': 'healthy',
-        'model_status': 'loaded' if model is not None else 'not loaded',
-        'image_size': f"{IMG_SIZE}x{IMG_SIZE}",
-        'classes': CLASS_NAMES,
-        'num_classes': len(CLASS_NAMES),
-        'endpoints': [
-            {'path': '/', 'method': 'GET', 'description': 'Basic status'},
-            {'path': '/predict', 'method': 'POST', 'description': 'Upload image file for prediction'},
-            {'path': '/predict_base64', 'method': 'POST', 'description': 'Send base64 image for prediction'},
-            {'path': '/health', 'method': 'GET', 'description': 'Detailed health check'}
-        ],
-        'supported_formats': ['png', 'jpg', 'jpeg', 'gif', 'bmp']
+        'model_loaded': model is not None,
+        'tensorflow_version': tf.__version__,
+        'supported_formats': list(ALLOWED_EXTENSIONS),
+        'image_size': IMG_SIZE,
+        'classes': CLASS_LABELS
     })
 
 if __name__ == '__main__':
+    print("🚀 Starting Garbage Classification API...")
+    
     # Load model on startup
-    load_model()
+    if load_model():
+        print("✅ Model loaded successfully!")
+    else:
+        print("❌ Failed to load model!")
     
     # Run the app
     port = int(os.environ.get('PORT', 5000))
